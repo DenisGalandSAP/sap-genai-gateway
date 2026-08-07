@@ -386,3 +386,188 @@ knowing that will misread the magnitude, so say so wherever the figure is surfac
 - **Historical rows stay at zero.** Cost is computed at request time and written to
   the row; adding rates does not backfill. The ledger therefore has a discontinuity at
   the point rates were added — 163 zero rows before, priced rows after.
+
+---
+
+## D13 — IAS SSO on the admin UI, `sub` as the user id
+
+**Status:** accepted, not yet wired — planned for Phase 2 (localhost first)
+
+Phase 1 issues virtual keys by hand with the master key. That does not survive more
+than one or two developers: someone has to be asked, and the person asking has the
+master key in their shell history. IAS gives self-service — a developer logs in with
+their corporate identity and mints their own key, scoped and budgeted by the defaults
+we set.
+
+Config lives in `docs/identity.md`.
+
+**SSO gates the admin UI, not the API.** This is the point people conflate. The data
+path stays static-bearer virtual keys (D6) because no IDE client can run an OAuth2
+flow. IAS decides *who may obtain a key*; the key alone decides *what may call the
+gateway*. Putting IAS in front of `/v1/*` would break every client — see D6.
+
+**Set `GENERIC_USER_ID_ATTRIBUTE=sub`.** LiteLLM defaults to `preferred_username`,
+which in IAS is usually the email and which users can change. A changed value is not
+recognised as the same person: they get a second identity, a second set of keys, and
+their spend history forks silently. `sub` is immutable. This is cheap to set now and
+expensive to unpick later, because the ledger rows are already written.
+
+**Inspect the claims before wiring.** IAS claim naming is not reliably what you would
+guess. Add `<PROXY_BASE_URL>/sso/debug/callback` as a second redirect URI and complete
+a login at `/sso/debug/login` to see the actual field names.
+
+**Consequence — key TTL is what makes offboarding work.** Removing a user from the IAS
+app blocks new logins. It does **not** revoke a key that has already been issued;
+LiteLLM never re-checks IAS on a data-path request. So set `duration` on every key.
+Without it, a leaver's key keeps spending capacity units until someone notices.
+
+**Auto-provisioning defaults must include the Claude aliases.** Granting only
+`gpt-4o-governed` locks every SSO-provisioned user out of Claude Code, which is the
+primary client (D15). All three aliases, or the first login is a support ticket.
+
+**Budgets are in capacity units** (D11), not euros. Say CU in the UI copy and the
+onboarding doc, because LiteLLM renders the figure like currency.
+
+---
+
+## D14 — Identity stops at the gateway
+
+**Status:** accepted — a constraint, not a choice
+
+AI Core is reached with an OAuth2 **client_credentials** token minted from the service
+key. That grant type carries no end-user context by construction, and orchestration
+exposes no header or payload field to carry one. There is no principal propagation to
+AI Core and there is no way to build one.
+
+So AI Core sees exactly one consumer: the technical user behind the service key. All
+per-developer attribution lives in our own Postgres ledger (D5).
+
+**Rejected: one AI Core service key per developer.** It would put real identity in AI
+Core's own logs, but each key is a tenant-level credential to provision, rotate and
+revoke, resource groups are not per-user, and it dissolves the single governed ingress
+that D2 exists to create. The cure is worse.
+
+**Consequence for a client engagement.** A client auditing their own subaccount sees
+one anonymous technical consumer, not their developers. If this ever runs in a client
+landscape, exporting the spend ledger becomes a contractual deliverable rather than a
+convenience — `GET /spend/report`, or SQL against `LiteLLM_SpendLogs`. Say so before
+someone assumes BTP cost reporting will break it down for them.
+
+---
+
+## D15 — Claude Code primary, Continue secondary
+
+**Status:** accepted 2026-08-07
+
+Cline drove the PoC because it has the fewest moving parts, and it stays supported.
+For rollout the roster is:
+
+| Client | Role | Path |
+|---|---|---|
+| **Claude Code** | primary — agentic work | `/v1/messages`, `anthropic_messages` |
+| **Continue** | secondary — in-editor chat/edit/apply | `/v1/chat/completions`, `acompletion` |
+| Cline | supported, not promoted | `/v1/chat/completions` |
+| Copilot | out of scope (see spec.md) | — |
+
+Both primary and secondary are verified end to end on scoped keys (D5). They exercise
+**different translation paths inside LiteLLM**, which is why both are named: a change
+that passes on one can break the other, and D12 is the standing example.
+
+**Continue's `autocomplete` role stays unset.** It fires on every typing pause against
+a metered backend, and no FIM-capable model is deployed in the resource group anyway.
+Autocomplete stays on local Ollama — the honest exception to "all developer AI traffic
+is governed", and better stated than hidden.
+
+**Diagnostic worth memorising: file editing IS tool calling.** Read, Write, Edit and
+Bash are tool definitions in the request; there is no separate mechanism. If tools stop
+reaching the model, Claude Code does not fail loudly — it degrades into a chatbot that
+says *"you should change line 42 to…"* instead of changing it. That reads as a weak
+model and costs a day of prompt tuning before anyone suspects the gateway. Describing
+edits instead of making them means tools are not arriving: run the smoke test, don't
+debug the prompt.
+
+---
+
+## D16 — Cloud Foundry, Python buildpack — after local validation
+
+**Status:** accepted 2026-08-07. Target for Phase 3; **Phase 2 stays on localhost.**
+
+Artifacts in `deploy/cf/`. Two decisions in one.
+
+**Why CF over Kyma.** Kyma gives BTP Operator service bindings, HPA and Istio-level
+network policy — all genuinely better. But a Kyma runtime is a minimum three-node
+cluster consuming capacity units continuously, which is heavy for a single I/O-bound
+container. Unless a Kyma cluster is already running for other reasons, CF is cheaper
+and simpler and still gets native service binding.
+
+**Why buildpack over `cf push --docker-image`.** The deciding factor is
+`config/litellm_patches.py` (D10). It is loaded as `callbacks: litellm_patches.patch_handler`,
+which resolves only because the file sits in the working directory — locally that is a
+volume mount, and a Docker app on CF has no equivalent. Keeping the patch would mean
+building and hosting a derived image. The buildpack just pushes the file alongside
+`config.yaml`.
+
+**The cost of that choice: the digest pin becomes a version pin.** `docker-compose.yml`
+pins by digest precisely because the SAP provider is young and upgrades are breaking.
+`requirements.txt` can only pin `litellm[proxy]==<version>`, so the two must be kept in
+step by hand: the pinned digest is litellm **1.95.0**, and `requirements.txt` says
+1.95.0. Move one, move the other, and re-run the smoke test against both.
+
+**Push the patch file.** If `litellm_patches.py` is not in the push directory the proxy
+boots clean, the health check goes green, and every `streaming + tool calling` request
+— the only shape agentic clients send — 500s inside the SSE body. That is D10's exact
+failure mode, silently reintroduced. `deploy/cf/README.md` lists the push set.
+
+**Verify empirically, in this order:**
+
+1. **Streaming through the Gorouter.** Unknown timeout, and possible response
+   buffering that would turn a stream into one late lump. This is the one risk that
+   could make CF unsuitable — test a five-minute stream before migrating anything.
+2. First boot runs Prisma migrations and exceeds the default startup timeout:
+   `cf push -t 180`.
+3. The bound Postgres URI needs `postgres://` → `postgresql://` (Prisma rejects the
+   short scheme) and `sslmode=require`. Handled in `start.sh`; silent if bypassed.
+
+**Accepted gap — no route-level IP allowlist.** D6's compensating control was an Istio
+`AuthorizationPolicy` scoped to VPN egress ranges. CF has no equivalent, so virtual
+keys are the *only* gate on a public HTTPS route. Compensate with short key TTLs (D13)
+and budget caps so a leaked key has bounded blast radius, and revisit if a security
+review pushes back.
+
+**Do not add an AppRouter.** It is the instinctive BTP move and it breaks every client,
+for the same reason IAS on the data path does — see D6.
+
+**Corollary to D9: do not carry `$$` into CF.** The `$$` escape is a docker-compose
+artefact. On CF the service key arrives unescaped from `VCAP_SERVICES`, and anything
+set by hand with `cf set-env` must use the literal `$`.
+
+**Not closed: whose subaccount.** CF answers *how* to deploy, not *whose* landscape it
+runs in. Client subaccount means their capacity units, their security review, and an
+awkward conversation at contract end; a Flexso-operated gateway with per-client keys
+and chargeback is the cleaner commercial shape. Decide before Phase 3.
+
+**Rejected for now: Azure Container Apps / AKS.** Runs the same stateless container
+fine, and would be attractive if the gateway should not live in the client's
+subaccount. It loses BTP-native service binding — the service key becomes something
+you store and rotate yourself — which is precisely the part a reviewer asks about.
+Revisit only if the tenancy question above lands outside BTP.
+
+---
+
+## D17 — No CAP control plane
+
+**Status:** rejected for now, revisit on demand
+
+The BTP-native instinct is to build a CAP service in front of the gateway: key
+issuance, approval workflow, chargeback per engagement, a Fiori self-service UI.
+
+Rejected because LiteLLM's admin UI already covers what we need — self-service key
+issuance under IAS login (D13), budgets, spend reporting. Building CAP means
+reimplementing key management, the spend ledger, streaming translation and the
+`/v1/messages` path, all of which exist and are verified.
+
+Worth building only when one of these is a real requirement, not a nice-to-have:
+per-engagement chargeback with an approval step, a self-service UI for people who
+should not see the LiteLLM admin console, or integration with an existing BTP
+provisioning flow. It is a control plane on top of the gateway, never a replacement
+for it.

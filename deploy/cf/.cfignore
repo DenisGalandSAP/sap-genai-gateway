@@ -1,0 +1,6 @@
+.env
+.git
+docs/
+scripts/
+docker-compose.yml
+__pycache__/

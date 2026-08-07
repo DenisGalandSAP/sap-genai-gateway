@@ -1,0 +1,4 @@
+# Shell scripts must keep LF. A CRLF start.sh checked out on a CF buildpack
+# container fails as `bad interpreter: /usr/bin/env bash^M` — a confusing crash
+# at push time, on Windows only.
+*.sh text eol=lf

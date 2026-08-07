@@ -1,0 +1,46 @@
+# Continue — distributable team template.
+#
+# Copy to ~/.continue/config.yaml. Both the key and the URL are read from the
+# environment, so this file contains no secrets and short-TTL key rotation (D13)
+# needs no edit here:
+#
+#   export GENAI_GATEWAY_URL=http://localhost:4000/v1     # https://<route>/v1 once deployed
+#   export GENAI_GATEWAY_KEY=sk-...                       # scoped virtual key, never the master key
+#
+# Continue is the secondary client (D15). Claude Code is primary — see docs/claude-code.md.
+
+name: SAP Gen AI Hub
+version: 1.0.0
+schema: v1
+
+models:
+  - name: Claude Sonnet (governed)
+    provider: openai            # OpenAI-compatible path; the gateway hides the SAP backend
+    model: claude-sonnet-governed
+    apiBase: ${{ env.GENAI_GATEWAY_URL }}
+    apiKey: ${{ env.GENAI_GATEWAY_KEY }}
+    roles:
+      - chat
+      - edit
+      - apply
+
+  - name: GPT-4o (governed)
+    provider: openai
+    model: gpt-4o-governed
+    apiBase: ${{ env.GENAI_GATEWAY_URL }}
+    apiKey: ${{ env.GENAI_GATEWAY_KEY }}
+    roles:
+      - chat
+      - edit
+      - apply
+
+# NOTE: the `autocomplete` role is deliberately absent from every model — see D15.
+# It fires on every typing pause against a metered backend, and no FIM-capable model
+# is deployed in the resource group anyway. Autocomplete stays on local Ollama; that
+# is the one honest exception to "all developer AI traffic is governed".
+
+context:
+  - provider: file
+  - provider: code
+  - provider: diff
+  - provider: terminal

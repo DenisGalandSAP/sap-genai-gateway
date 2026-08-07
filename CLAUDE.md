@@ -9,8 +9,13 @@ model path instead of public endpoints.
 Copilot BYOK is **out of scope** — dropped 2026-08-06 as not required, not blocked.
 Don't re-add it to status tables as an open gap; see `docs/spec.md`.
 
-**Current phase: localhost PoC.** Do not add Kyma/CF deployment artifacts unless
-explicitly asked. See `docs/spec.md` for the phased plan.
+**Current phase: Phase 2 — identity and multi-user, still on localhost.** Phase 1 (the
+PoC) is complete. IAS SSO, per-user keys and TTLs get wired and proved against
+`localhost:4000` *before* anything is deployed — see `docs/spec.md` and `docs/identity.md`.
+
+**Cloud Foundry is decided (D16) but is Phase 3.** `deploy/cf/` exists and has never
+been exercised; don't treat it as working, and don't add Kyma or Azure artifacts —
+both were considered and rejected in D16.
 
 ## Architecture
 

@@ -22,7 +22,7 @@ which is what makes this defensible in a client governance review.
 
 ---
 
-## Phase 1 — localhost PoC  ← current
+## Phase 1 — localhost PoC  ✅ complete (2026-08-06)
 
 **Purpose: answer the tool-calling question before spending money on infrastructure.**
 
@@ -117,65 +117,110 @@ constraints shaped the design; that reasoning stands.
 
 ---
 
-## Phase 2 — shared deployment (not yet)
+## Phase 2 — identity and multi-user, still on localhost  ← current
 
-Only once Phase 1 proves the pattern and more than one person wants it.
+**Purpose: make the gateway survive more than one user before it survives a network.**
 
-### Decisions still open
+Phase 1 issued keys by hand with the master key. That does not scale past two people,
+and the deploy questions (IAS redirect URIs, key TTLs, per-user budgets) are cheaper to
+get wrong locally than on a route. Everything here runs against
+`http://localhost:4000` — deliberately, so a failure costs a `docker compose restart`
+and nothing else.
 
-**Where to host is undecided, and BTP is not the only candidate** (noted 2026-08-06 —
-Azure is in the running). Worth being explicit about what that does and does not change:
+### Steps
 
-The gateway is a **stateless container plus Postgres** that holds an AI Core service
-key and talks outbound HTTPS to one endpoint. Nothing in Phase 1 depends on BTP. It
-runs anywhere that can host a container, hold a secret, and reach
-`api.ai.prod.eu-central-1.aws.ml.hana.ondemand.com`.
+1. **Wire IAS SSO on the admin UI** — `docs/identity.md`, D13.
+   - Register the OIDC app with `http://localhost:4000/sso/callback`. If tenant policy
+     refuses a non-HTTPS redirect URI, tunnel with ngrok on a static domain and set
+     `PROXY_BASE_URL` to the tunnel — details and the exposure caveat in
+     `docs/identity.md`. The tunnel comes down when the test is done; it is not a
+     standing setup, because it puts a live AI Core key on a public route.
+   - Inspect the claims at `/sso/debug/login` **before** wiring, then set
+     `GENERIC_USER_ID_ATTRIBUTE=sub`.
+   - Auto-provision defaults must grant all three aliases, or Claude Code is broken on
+     first login.
+2. **Prove the multi-user story end to end.** Log in as a second identity, self-serve a
+   key, confirm the spend rows carry that user, confirm budgets cap and revocation
+   bites. This is D5's evidence table repeated per *user* rather than per *key*.
+3. **Set key TTLs.** `duration` on every key. IAS deprovisioning blocks new logins but
+   does not revoke a live key (D13) — expiry is what makes offboarding automatic.
+4. **Distribute the client configs.** `config/continue.config.yaml` (key and URL from
+   env vars, no secrets in the file) and `docs/claude-code.md`. Second developer
+   onboards from the docs alone — if they can't, the docs are the deliverable that
+   failed, not them.
+5. **Re-run the smoke test per alias** and drive one real Claude Code session on a
+   self-served key, not the master key.
+
+### Exit criteria
+
+Two distinct IAS identities, each self-serving a scoped and budgeted key, each showing
+up separately in the spend ledger, with a real client driving a real task on each.
+No master key outside the operator's shell.
+
+---
+
+## Phase 3 — Cloud Foundry
+
+**Decided 2026-08-07: Cloud Foundry, Python buildpack.** Rationale, trade-offs and the
+rejected alternatives (Kyma, Azure, `--docker-image`) are in D16. Artifacts and the
+push procedure are in `deploy/cf/`.
+
+### Sequence
+
+1. `cf create-service` for `aicore` and `postgresql-db`.
+2. Assemble the push directory — including `litellm_patches.py`, the easiest thing to
+   forget and the one whose absence fails silently (D10, D16).
+3. `cf set-env` for `LITELLM_MASTER_KEY` and the IAS `GENERIC_*` vars; update the IAS
+   redirect URI to the route.
+4. `cf push -t 180` — first boot runs Prisma migrations.
+5. Verify in the order below, then re-run Phase 2's exit criteria against the route.
+
+### Verify empirically, in priority order
+
+- **Streaming through the Gorouter.** Unknown timeout, and possible response buffering
+  that would deliver a stream as one late lump. The one open risk that could make CF
+  unsuitable — test a five-minute stream before migrating anything else.
+- **Prisma on a buildpack container.** It fetches its own engine binaries at first
+  boot; untested here. First place to look if the initial push hangs.
+- **Postgres URI rewrite** — `postgres://` → `postgresql://` plus `sslmode=require`.
+  Handled in `start.sh`, silent if bypassed.
+- **A real Claude Code session**, not just the smoke test. Different endpoint,
+  different translation path (D12).
+
+### Accepted gaps
+
+- **No route-level IP allowlist.** D6's compensating control was an Istio
+  `AuthorizationPolicy` scoped to VPN egress; CF has no equivalent, so virtual keys are
+  the only gate on a public HTTPS route. Compensate with short TTLs and budget caps so
+  a leaked key has bounded blast radius. Revisit if a security review pushes back.
+- **Attribution lives only in our Postgres.** AI Core sees one technical user (D14), so
+  a client auditing their subaccount sees one anonymous consumer. If this runs in a
+  client landscape, spend export becomes a contractual deliverable.
+
+### Still open — needs a human decision
+
+**Whose subaccount.** CF answers *how* to deploy, not *whose* landscape it runs in.
+Client landscape means their capacity units, their security review, and an awkward
+conversation at contract end. A Flexso-operated gateway with per-client virtual keys
+and chargeback via the spend ledger is the cleaner commercial shape. Decide before
+Phase 3 starts, not during.
+
+### If CF turns out to be wrong
+
+The gateway is a **stateless container plus Postgres** holding one secret and talking
+outbound HTTPS to one endpoint. Nothing in it depends on BTP, so the target is
+reversible:
 
 | Stays true wherever it lands | Changes with the host |
 |---|---|
-| The governed path — AI Core is still the model backend | Service-key delivery: BTP Operator / CF binding vs Key Vault, Secrets Manager, … |
-| The whole config: aliases, filtering, cost map, `drop_params` | Ingress and network policy (D6's `noAuth` + VPN-range argument) |
-| Virtual keys, budgets, spend ledger (D5, D11) | Whether the AI Core service key leaves the SAP landscape — a governance question, not a technical one |
-| The `$$`-escaping, digest pinning and patch traps (D9, D10) | Who pays, and who runs it |
+| The governed path — AI Core is still the model backend | Service-key delivery: CF binding vs Key Vault, Secrets Manager, … |
+| The whole config: aliases, filtering, cost map, `drop_params` | Ingress and network policy |
+| Virtual keys, budgets, spend ledger (D5, D11, D13) | Whether the AI Core service key leaves the SAP landscape — a governance question, not a technical one |
+| The `$$`-escaping, pinning and patch traps (D9, D10, D16) | Who pays, and who runs it |
 
-Hosting outside BTP does **not** mean traffic leaves the governed path — AI Core is
-still the backend and the enterprise contract still applies. It does mean the service
-key is stored outside SAP's landscape, which is the part a reviewer will ask about.
-
-- **Whose subaccount / tenancy.** Running dev tooling in the client's landscape means
-  their capacity units, their security review, and an awkward conversation at contract
-  end. A Flexso-operated gateway with per-client virtual keys and chargeback via the
-  spend ledger is the cleaner commercial shape. Decide before building.
-- **Azure (or any container host).** Container Apps or AKS, secret in Key Vault, private
-  networking. Attractive if the team already operates Azure or the gateway should not
-  live in the client's subaccount. Loses BTP-native service binding — the service key
-  becomes something you rotate yourself. Note the Kyma/CF trade-off below applies only
-  if you stay on BTP.
-- **Kyma vs Cloud Foundry.** Kyma gives BTP Operator service bindings, HPA, and
-  Istio-level network policy. But a Kyma runtime is a minimum three-node cluster
-  consuming CUs continuously — heavy for one I/O-bound container. If Kyma isn't
-  already running for other reasons, `cf push --docker-image` is cheaper and simpler
-  and still gets native service binding.
-
-### Known traps for Phase 2
-
-Recording these now so they aren't rediscovered:
-
-- **Ingress auth is a genuine conflict.** The "correct" answer (Kyma APIRule `jwt`
-  handler / IAS) breaks every client, because none can run an OAuth2 flow — they can
-  only send a static bearer. So the gateway must be `noAuth` with LiteLLM virtual keys
-  *as* the authentication, which means a public endpoint fronting a live AI Core
-  service key. Mitigate with an Istio `AuthorizationPolicy` restricted to corporate
-  VPN egress ranges, or mTLS if the client demands it.
-- **Streaming timeouts.** Istio's default route timeout severs long agent streams
-  mid-response and surfaces as a generic client error. Set APIRule `timeout: 3600`
-  (max 3900).
-- **Istio sidecar required.** APIRule v2 validates that the workload is in the mesh;
-  label the namespace `istio-injection=enabled`.
-- **Postgres is not optional** once shared. The spend ledger *is* the audit story;
-  it cannot live in memory or on an unbacked PVC.
-- **APIRule v1beta1 is gone.** Use `gateway.kyma-project.io/v2`, handlers `noAuth` /
-  `jwt` / `extAuth`.
+Hosting outside BTP would **not** mean traffic leaves the governed path — AI Core is
+still the backend and the enterprise contract still applies. It would mean the service
+key is stored outside SAP's landscape, which is the part a reviewer asks about.
 
 ### Observability
 

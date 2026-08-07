@@ -1,0 +1,7 @@
+# Pin, and keep it in step with docker-compose.yml by hand.
+#
+# Locally the image is pinned BY DIGEST because the SAP provider is young and
+# upgrades are breaking. A buildpack can only pin a version, so the two pins have
+# to be reconciled manually: the digest in docker-compose.yml is litellm 1.95.0.
+# Move one, move the other, and re-run the smoke test against both. See D16.
+litellm[proxy]==1.95.0

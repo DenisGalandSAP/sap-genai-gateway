@@ -1,0 +1,25 @@
+---
+# Cloud Foundry deployment — see docs/decisions.md D16.
+# NOT yet exercised. Phase 2 stays on localhost; this is Phase 3.
+applications:
+  - name: ai-gateway
+    memory: 2G
+    disk_quota: 2G
+    instances: 1
+    buildpacks:
+      - python_buildpack        # buildpack, not docker — D16 (the D10 patch file)
+    command: ./start.sh
+    health-check-type: http
+    # Liveliness only: 200 whenever the process is up. It does NOT check Postgres
+    # or AI Core, and stays green while the gateway is unusable. The smoke test
+    # against the route is the real health signal.
+    health-check-http-endpoint: /health/liveliness
+    services:
+      - aicore                  # AI Core service instance   -> AICORE_SERVICE_KEY
+      - ai-gateway-db           # postgresql-db instance     -> DATABASE_URL
+    env:
+      LITELLM_MODE: PRODUCTION
+# First deploy runs Prisma migrations and exceeds the default startup timeout:
+#   cf push -t 180
+# LITELLM_MASTER_KEY and the IAS GENERIC_* vars (docs/identity.md) are set with
+# `cf set-env`, not here — this file is committed.

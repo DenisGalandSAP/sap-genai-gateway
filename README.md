@@ -3,10 +3,15 @@
 LiteLLM proxy putting local AI coding tools on SAP Generative AI Hub (BTP AI Core)
 instead of public model endpoints.
 
-**Phase: localhost PoC — complete.** Tool calling survives orchestration (verified
+**Phase 1, localhost PoC — complete.** Tool calling survives orchestration (verified
 2026-08-06 on `gpt-4o` and Claude Sonnet 4.5; all six smoke checks pass on both). Cline,
 Continue and Claude Code all drive real tasks through it, with per-request cost metered
 in capacity units.
+
+**Phase 2, current — identity and multi-user, still on localhost.** IAS SSO on the
+admin UI, self-served keys with TTLs and budgets, proved locally before anything is
+deployed. Cloud Foundry is decided (D16) and is Phase 3; `deploy/cf/` is written and
+not yet exercised. `HANDOFF.md` is the short version of where this stands.
 
 ## Quickstart
 
@@ -50,7 +55,7 @@ Cline is the least fiddly starting point:
 
 - **Cline** — OpenAI Compatible, base `http://localhost:4000/v1`, key, model `gpt-4o-governed`
 - **Claude Code** — run `scripts\claude-governed.ps1` **in a separate terminal**. It sets the `ANTHROPIC_*` vars for that shell only, so a Claude Code session you already have open is not redirected mid-task. Sets `ANTHROPIC_DEFAULT_HAIKU_MODEL` too — without it, background calls fail quietly while the main model looks fine.
-- **Continue** — `~/.continue/config.yaml`, `provider: openai` + `apiBase` + `apiKey`; file-based, so scriptable
+- **Continue** — copy `config/continue.config.yaml` to `~/.continue/config.yaml`; it reads the key and URL from `GENAI_GATEWAY_KEY` / `GENAI_GATEWAY_URL`, so the file holds no secrets
 Copilot BYOK is out of scope (not required). See `docs/spec.md` if that changes.
 
 Give each client its **own virtual key**, not the master key — scoped to the aliases it
@@ -66,12 +71,18 @@ curl -X POST localhost:4000/key/generate -H "Authorization: Bearer $LITELLM_MAST
 
 ```
 CLAUDE.md                    constraints for Claude Code — read first
-docs/spec.md                 phased plan, Phase 2 traps recorded in advance
+HANDOFF.md                   where this stands, what's next, what's undecided
+docs/spec.md                 phased plan; Phase 3 traps recorded in advance
 docs/decisions.md            ADRs, including what was rejected and why
+docs/identity.md             IAS SSO, key issuance and TTLs (D13) — Phase 2
+docs/claude-code.md          primary client: setup, budget, the tools diagnostic (D15)
 config/litellm.config.yaml   proxy config; verified against the pinned image
 config/litellm_patches.py    startup workaround for the stream+tools bug (D10)
+config/continue.config.yaml  distributable Continue template; no secrets in the file
 scripts/smoke_test.py        the PoC deliverable
+scripts/claude-governed.ps1  launch Claude Code at the gateway, this shell only
 scripts/refresh_costs.py     re-pull SAP capacity-unit rates (D11)
+deploy/cf/                   Cloud Foundry push (D16) — written, never exercised
 ```
 
 ## Cost
