@@ -1,0 +1,48 @@
+# Local PoC. Postgres is included even though the proxy would start without it —
+# virtual keys and the spend ledger do not persist otherwise, and running the real
+# configuration from the start avoids a rewrite at Phase 2.
+
+services:
+  litellm:
+    # Pinned by digest, not by tag. The SAP provider is young; treat upgrades as
+    # breaking and re-verify config/litellm.config.yaml against the new image's
+    # litellm/llms/sap/ source before moving this.
+    # Digest below == litellm 1.95.0 (main-stable as of 2026-08-06).
+    image: ghcr.io/berriai/litellm@sha256:af806882b7a6ced41658db5b6a7e98ed7b9b51d03b935e0417bf1c8552d688af
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./config/litellm.config.yaml:/app/config.yaml:ro
+      # Startup patch for the pydantic 2.13 / litellm 1.95 stream+tools bug.
+      # /app is the working directory and therefore importable. See the
+      # removal condition in the file's docstring.
+      - ./config/litellm_patches.py:/app/litellm_patches.py:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://litellm:litellm@db:5432/litellm
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: litellm
+      POSTGRES_PASSWORD: litellm
+      POSTGRES_DB: litellm
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm"]
+      interval: 5s
+      retries: 10
+    # Must match the proxy's policy. Without it, restarting the Docker daemon
+    # brings litellm back but not the database, and the proxy then crash-loops
+    # on "httpx.ConnectError: All connection attempts failed" during startup --
+    # `depends_on` only orders the initial `up`, it does not restart db later.
+    restart: unless-stopped
+
+volumes:
+  pgdata:

@@ -1,0 +1,147 @@
+# LiteLLM proxy — SAP Generative AI Hub via Orchestration
+#
+# Verified against the pinned image: litellm 1.95.0 (see docker-compose.yml).
+# Source of truth checked: litellm/llms/sap/chat/{transformation,models}.py inside
+# that image, not the docs page — https://docs.litellm.ai/docs/providers/sap does
+# not document the orchestration path or the module params at all.
+#
+# Auth comes from AICORE_SERVICE_KEY (whole service-key JSON, single env var).
+# The provider reads AICORE_* from the environment itself; there are no
+# sap_* litellm_params. Credential resolution is first-source-wins, so do not
+# mix AICORE_SERVICE_KEY with the individual AICORE_CLIENT_ID/SECRET vars.
+
+model_list:
+  # ---- Primary: governed path through the orchestration service ----
+  #
+  # `sap/<model>` IS the orchestration path. The provider posts to
+  # <deployment>/v2/completion and finds the deployment by listing /lm/deployments
+  # and matching scenarioId == "orchestration" — so there is no deployment-id
+  # param to set. See the caveat in docs/decisions.md D8.
+  - model_name: gpt-4o-governed          # what clients see
+    litellm_params:
+      model: sap/gpt-4o
+      temperature: 0.2
+      # Orchestration modules are top-level litellm_params named after the
+      # module: grounding / masking / filtering / translation.
+      # Thresholds are snake_case and take 0|2|4|6, where 6 = ALLOW_ALL
+      # (most permissive) and 0 = ALLOW_SAFE (strictest).
+      filtering:
+        input:
+          filters:
+            # Permissive on input — ordinary developer vocabulary trips
+            # Violence and SelfHarm, and a block mid-agent-loop is a hard
+            # failure with a misleading error. See docs/decisions.md D4.
+            - type: azure_content_safety
+              config:
+                hate: 6
+                self_harm: 6
+                sexual: 4
+                violence: 6
+        output:
+          filters:
+            # Output filtering is where the governance story actually lives.
+            - type: azure_content_safety
+              config:
+                hate: 4
+                sexual: 2
+    model_info:
+      supports_function_calling: true    # smoke_test.py proves or disproves this
+      # Cost in CAPACITY UNITS, not currency. SAP publishes CU per 1,000 tokens
+      # in the model catalogue; LiteLLM wants per-token, hence /1000.
+      # Refresh with scripts/refresh_costs.py — rates change. See D11.
+      input_cost_per_token:  0.00000159   # 0.00159 CU / 1k
+      output_cost_per_token: 0.00000616   # 0.00616 CU / 1k
+
+  # ---- Claude alias, for Claude Code via the /v1/messages endpoint ----
+  #
+  # SAP's model names use a double dash: `anthropic--claude-4.5-sonnet`.
+  # Claude Code is tuned for Claude models, so this is the better backing model
+  # for it than gpt-4o — and it keeps the traffic on the same governed path.
+  #
+  # Tool calling is re-verified per alias (see CLAUDE.md): run
+  #   SMOKE_MODEL=claude-sonnet-governed python scripts/smoke_test.py
+  - model_name: claude-sonnet-governed
+    litellm_params:
+      model: sap/anthropic--claude-4.5-sonnet
+      temperature: 0.2
+      # Claude Code sends `thinking` on every request; SAP orchestration has no
+      # such param and the call 400s. Drop that ONE param — not all of them.
+      # `drop_params: true` would also silently swallow `tools`, which is
+      # precisely the failure D7 exists to prevent. See D12.
+      additional_drop_params: ["thinking"]
+      filtering:
+        input:
+          filters:
+            - type: azure_content_safety
+              config:
+                hate: 6
+                self_harm: 6
+                sexual: 4
+                violence: 6
+        output:
+          filters:
+            - type: azure_content_safety
+              config:
+                hate: 4
+                sexual: 2
+    model_info:
+      supports_function_calling: true
+      input_cost_per_token:  0.00000223   # 0.00223 CU / 1k
+      output_cost_per_token: 0.00001087   # 0.01087 CU / 1k
+
+  # ---- Small/fast alias ----
+  #
+  # Claude Code runs background work (conversation titles, file summaries) on a
+  # separate small model. Point ANTHROPIC_DEFAULT_HAIKU_MODEL at this, or those
+  # background calls request a model the gateway does not expose and fail.
+  - model_name: claude-haiku-governed
+    litellm_params:
+      model: sap/anthropic--claude-4.5-haiku
+      additional_drop_params: ["thinking"]   # same as above — see D12
+      filtering:
+        input:
+          filters:
+            - type: azure_content_safety
+              config: {hate: 6, self_harm: 6, sexual: 4, violence: 6}
+        output:
+          filters:
+            - type: azure_content_safety
+              config: {hate: 4, sexual: 2}
+    model_info:
+      supports_function_calling: true
+      input_cost_per_token:  0.00000079   # 0.00079 CU / 1k
+      output_cost_per_token: 0.00000367   # 0.00367 CU / 1k
+
+  # masking_module_config / `masking:` is OMITTED DELIBERATELY — see D3.
+  # Do not add it. Pseudonymization corrupts verbatim code round-trips.
+
+  # ---- Fallback: direct deployment access ----
+  # Only enable if the smoke test shows tool calling does NOT survive
+  # orchestration. Bypasses output content filtering — see D2.
+  # Requires a foundation-models deployment of the model in the resource group;
+  # `default` currently has one for gpt-4o-mini (d79ed3004d0c0717).
+  #
+  # - model_name: gpt-4o-direct
+  #   litellm_params:
+  #     model: sap/gpt-4o-mini
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+
+litellm_settings:
+  # Imported at startup purely for its import side effect: it force-rebuilds
+  # litellm's streaming pydantic models. Without it, every stream+tools request
+  # — i.e. every agentic client — ends in a 500 instead of [DONE]. See D10 and
+  # the removal condition in config/litellm_patches.py.
+  callbacks: litellm_patches.patch_handler
+
+  # Fail loudly rather than silently discarding unsupported params — a dropped
+  # tools[] param looks like "the model won't use tools". See D7.
+  drop_params: false
+
+  # Local PoC: console only. Phase 2: point OTEL at SAP Cloud Logging.
+  # callbacks: ["otel"]
+
+  request_timeout: 600        # agent turns are long
+  num_retries: 2
